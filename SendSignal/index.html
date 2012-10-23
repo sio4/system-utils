@@ -1,0 +1,799 @@
+
+<HTML>
+<Head>
+  <Title>SendSignal</Title>
+  <Link Rel="stylesheet" Href="/lnh.css" Type="text/css">
+  
+</Head>
+<Body>
+
+  <!-- ---------- location bar ---------- -->
+  <Table Border="0" CellSpacing="0" CellPadding="0" Width="100%" Class="GlobalHeader">
+    <TR>
+      <TD Width="90%">
+        <Img Src="/lnh-sm.gif" width="20" height="20" Align="absmiddle" Alt="[site-logo]">
+        
+              <A Href="/">LateNightHacking</A>
+              <Img Src="/arrow.gif" width="10" height="8" Align="baseline" alt="-&gt;">
+              
+              <A Href="/louisth/">Louis</A>
+              <Img Src="/arrow.gif" width="10" height="8" Align="baseline" alt="-&gt;">
+              
+              <A Href="/projects/">Projects</A>
+              <Img Src="/arrow.gif" width="10" height="8" Align="baseline" alt="-&gt;">
+              
+              <A Href="/projects/2003/">2003</A>
+              <Img Src="/arrow.gif" width="10" height="8" Align="baseline" alt="-&gt;">
+              
+      </TD>
+      <TD Width="10%" Align="Right" Style="font-size:8pt">
+        
+      <Span Class="FakeLink"
+        OnClick="window.location='/&#97;uth'+'/projects/2003/sendSignal/index.html';"
+        OnMouseOver="window.status='Click to authenticate.';"
+        OnMouseOut="window.status='';"
+      >Auth</Span>
+      
+      </TD>
+    </TR>
+  </Table>
+  <Div Class="H1_o"><Div Class="H1_i">SendSignal</Div></Div>
+
+<P> 2003-10-01 : Java has this great feature where if you hit ctrl-break on the console, it dumps
+a list of threads and all their held locks to stdout. If your app is stuck, you can figure out
+what it is doing. If it is deadlocked, sometimes the JVM can even tell you exactly which threads
+are involved. The problem is that if you can't get to the console, you can't hit ctrl-break.
+This commonly happens to us when we are running under an IDE. The IDE captures stdout and
+there is no console. If the app deadlocks, there is no way to get the crucial debugging info. 
+
+<P> So, I decided to see if I could write a tool to send the ctrl-break signal from the command 
+line. Browsing though MSDN showed that 
+<A Href="http://msdn.microsoft.com/library/en-us/dllproc/base/generateconsolectrlevent.asp">GenerateConsoleCtrlEvent</A>
+should be perfect
+for the job. Just write a little wrapper and we're done, right? If only. When I tried to use it, 
+it always failed with <code>ERROR_INVALID_PARAMETER</code> unless I was trying to signal myself.
+
+<P> The next thing I tried was injecting a thread into the target process to call 
+<code>GenerateConsoleCtrlEvent</code>. I had all the code to do this from 
+<A Href="/projects/2001/saveConsole/">SaveConsole</A>. Well, that worked so long as the target 
+process was a console process. Our IDE started Java as a windowed process (<code>javaw.exe</code>
+instead of <code>java.exe</code>), so the call would fail with <code>ERROR_INVALID_HANDLE</code>.
+
+<P> After much digging around in the debugger I discovered that the entry point that actually
+does the behavior associated with a signal like ctrl-break is <code>kernel32!CtrlRoutine</code>.
+The function had the same prototype as 
+<A Href="http://msdn.microsoft.com/library/en-us/dllproc/base/threadproc.asp">ThreadProc</A>,
+so it can be used with 
+<a Href="http://msdn.microsoft.com/library/en-us/dllproc/base/createremotethread.asp">CreateRemoteThread</A> 
+directly, without having to inject code.
+However, that's not an exported symbol! It's at different addresses (and even has different names)
+on different versions of Windows. What to do?
+
+<P> Here is the solution I finally came up with. I install a console ctrl handler for my app, then 
+generate a ctrl-break signal for my app. When my handler gets called, I look back at the top of
+the stack to find out the parameters passed to <code>kernel32!BaseThreadStart</code>. I grab the
+first param, which is the desired start address of the thread, which is the address of
+<code>kernel32!CtrlRoutine</code>. Then I return from my handler, indicating that I have handled 
+the signal and my app should not be terminated. Back in the main thread, I wait until the address 
+of <code>kernel32!CtrlRoutine</code> has been retrieved. Once I've got it, I create a remote 
+thread in the target process with the discovered start address. This causes the ctrl handlers in 
+the target process to be evaluated as if ctrl-break had been pressed!
+
+<P> The nice thing is that only the target process is affected, and any process (even a windowed
+process) can be targeted. One downside is that my little app can't be used in a batch file, since
+it will kill it when it sends the ctrl-break event in order to discover the address of 
+<code>kernel32!CtrlRoutine</code>.
+
+<P> 2004-03-29 : Small update: I ended up needing to use it in a script, so now I know what 
+happens. If called directly, it will work but it will hang the script because <code>cmd.exe</code>
+will pause with a <code>Terminate batch job (Y/N)?</code> prompt. Not good for something that's 
+supposed to run unattended. :) However, you can use <code>start</code> to run it in a 
+separate console. You won't be able to redirect the output, but at least you won't get a 
+mysterious prompt. :)
+
+<P> Usage: 
+<Pre Class="codesamp">
+SendSignal &lt;pid&gt;
+  &lt;pid&gt; - send ctrl-break to process &lt;pid&gt; (hex ok)</Pre>
+
+<P> You can get the source via anonymous CVS at 
+<LI> <code>cvs -d :pserver:anon@www.latenighthacking.com:/code-cvsroot co 2003/SendSignal</code>
+
+<P> Due to popular demand, you can download the binary executable as well: 
+<A Href="SendSignal.exe">SendSignal.exe</A>. Due to further popular demand and corporate firewalls,
+here is a zip of the source: <A Href="SendSignalSrc.zip">SendSignalSrc.zip</A>.
+
+<P> (Source and executable freely available under the 
+<A Href="/projects/lnhfslicense.html">LNHFS License</A>.)
+
+<P><HR>
+<P> 2004-08-17 :
+<Div Class="LeftLineQuote">
+Hi Louis,
+<P> I have a customer that is trying to get a thread dump on our Java app
+and he is using SendSignal as I instructed him to do. When I run it in
+my environment it works like a charm, but unfortunately for him it
+kills the process.
+<P> Both processes run as Windows service, the only difference is that I
+am running on XP and they are running on 2000.
+<P> Do you have any idea as to why this is happening?
+</Div>
+
+<P> The customer is running Java with <code>-Xrs</code> (reduce signal usage). This is often done 
+when Java is running as a service. This causes Java to ignore signals like user log off. 
+Apparently, it also causes it to ignore ctrl-break, which means the default handler gets it. 
+The default handler terminates the app.
+
+<P> I suggest running Java without the <code>-Xrs</code> switch until you get the problem 
+debugged.
+
+<P><HR>
+<P> 2006-12-14 :
+If you are interested in more debugging features besides sending ctrl-break, or if you just want
+to pay money to send ctrl-break, 
+check out <A Href="http://www.adaptj.com/root/main/stacktrace">AdaptJ's Stacktrace</A>.
+
+
+<Script>
+  function ShowHideDiscuss() {
+    var spnDiscuss=document.getElementById("spnDiscuss");
+    var spnDiscuss2=document.getElementById("spnDiscuss2");
+    if ('none'==spnDiscuss.style.display) {
+      spnDiscuss.style.display='';
+      spnDiscuss2.style.display='';
+    } else {
+      spnDiscuss.style.display='none';
+      spnDiscuss2.style.display='none';
+    }
+  }
+</Script>
+<Div class="discuss-head">
+<B>C o m m e n t s :</B> 
+<!--
+&nbsp; &nbsp; 
+<Span class="FakeLink" 
+  OnClick="ShowHideDiscuss();"
+  OnMouseOver="window.status='Click to view visitor comments about this page.';"
+  OnMouseOut="window.status='';"
+>View</Span> 
+&nbsp; &nbsp; 
+-->
+  <Form Method="post" action="/common/discussEdit.html" Id="frmDiscussEdit" Style="display:none">
+    <Input Type="hidden" Name="mode" Value="edit">
+    <Input Type="hidden" Name="file" Value="\projects\2003\sendSignal\index.html">
+  </Form>
+<!--
+<Span class="FakeLink" 
+  OnClick="document.getElementById('frmDiscussEdit').submit();"
+  OnMouseOver="window.status='Click to add a comment to this page.';"
+  OnMouseOut="window.status='';"
+>Edit</Span>
+-->
+&nbsp; &nbsp; 
+updated:      2012-08-18 (65 days ago)
+</Div>
+<Div Id="spnDiscuss" class="discuss-body" xStyle="display:none;">
+Louis, i'm trying to download your source code, but the link seems to be died. Could you give me a link to download ?
+<hr>
+2004-03-22 : Louis, you ought to get a medal for this. I spent all afternoon manually doing thread dumps at 15 second intervals. This is a lifesaver, thanks!!!!
+<br> -- Steve Barber
+
+<hr>
+2004-03-29 : I'm glad you found it useful!
+<br> -- Louis! :)
+
+<hr>
+2004-05-06 : First of all I can just say that I agree fully with the previous comment. Its 
+really a great! 
+Normally it works fine but on one computer I always thet the message that I have not enough 
+storage. Do you know what this can be?
+<br>&nbsp;&nbsp;Sending signal to process 3688...
+<br>&nbsp;&nbsp;CreateRemoteThread failed with 0x00000008.
+<br>&nbsp;&nbsp;StartRemoteThread failed with 0x00000008.
+<br>&nbsp;&nbsp;0x00000008 == Not enough storage is available to process this command.
+
+<hr>
+2004-05-07 : I'm not sure. It may be a permissions issue. Do you have permission to debug that 
+process? For example, maybe you are running as a regular user and the process was started
+as a service and so is running as system? I don't know why it would give you that error, but
+I know that it's not too unusual for unexpected errors to be mapped to &quot;out of memory&quot;.
+<br> -- Louis! :)
+
+
+<hr>
+2004-05-11 : It was started as system service as localsystem and when I try to create the 
+thread dump I'm logged in as Administrator on this machine. 
+I also tried it as EnteriseAdmin and it did not work.
+I have no memory problems because I have still over 2GB free. The java services uses 300MB 
+(with maximum limit of 1.5GB)
+I also tried now to start the service under the Administration account but the same error occurs.
+Does sendsignal not working for windows services? when not do you know how to generate a 
+thread dump of java service?
+
+Hi, I am trying to use smartCVS client to setup a connection so that i can download the source code for sendsignal but no luck.
+it keeps coming back with authentication error to the host. 
+Is the information correct below.
+CVS path: :pserver:anon@www.latenighthacking.com:/code-cvsroot co /2003/SendSigna
+This resolves to
+User name: anon
+Server Name: www.latenighthacking.com
+Repository path: /code-cvsroot co /2003/SendSignal
+
+I am assuming that i dont need a password to connect given that its an annonymous connection.
+
+
+I appreatiate any comment on this topic.
+
+<hr>
+2004-05-18 : I was not able to reproduce the problem on my WinXP box, even when running Java as a 
+service and as a child process of a service. What OS are you running? One possibility
+is that for some reason you are not getting sufficient access even though the call to OpenProcess
+succeeds. Perhaps if you requested SE_DEBUG privilege it would work. Try commenting out the code 
+starting at line 195 so that it always sets the privilege and let me know what happens. If that
+fixes it, I could add a switch to force debug privilege, or reverse the logic so that it always
+tries to get debug privilege first, and then tries unprivileged access if that didn't work.
+<br> -- Louis! :)
+
+<hr>
+2004-06-23 :  I tried it now but everything failed. OS = win2000 sp4. 
+
+<hr>
+2004-06-25 : You'll have to give me more details for me to help you. Exactly which call failed? 
+With what error code?
+<br> -- Louis! :)
+
+<hr>
+2004-06-26 : I get the same error as above. The java process is started as a service, so it runs as SYSTEM,
+but I am logged in as Administrator. The actual product is BEA's Weblogic server running in
+nodemanager mode. Ideas? Weblogic server can be downloaded and tried out for free at www.bea.com
+<br>
+<br>&nbsp;&nbsp;Access denied; retrying with increased privileges.
+<br>&nbsp;&nbsp;CreateRemoteThread failed with 0x00000008.
+<br>&nbsp;&nbsp;StartRemoteThread failed with 0x00000008.
+<br>&nbsp;&nbsp;0x00000008 == Not enough storage is available to process this command.
+
+<hr>
+2004-07-29 : HI,  I have the same issue.
+<br>I run the process under local admin account ( as a service) and I get the following:
+<br>
+<br>&nbsp;&nbsp;D:\SendSignal&gt;sendsignal 4232
+<br>&nbsp;&nbsp;Sending signal to process 4232...
+<br>&nbsp;&nbsp;CreateRemoteThread failed with 0x00000008.
+<br>&nbsp;&nbsp;StartRemoteThread failed with 0x00000008.
+<br>&nbsp;&nbsp;0x00000008 == Not enough storage is available to process this command.
+
+
+<hr>
+2004-10-13 : Found a work around for the Batch file termination [y/n] issue.
+<br> I wanted to call the sendsignal application from a batch file. But it was asking for Termination. 
+<br> To avoid this, i am using a wrapper for this sendsignal, and calling this application 
+<br> using the CreateProcess(..) api. I have created wrapper in the same program itself. so sendsignal &lt;pid&gt;
+<br> will call sendsignal again with an additional argument.. create..pro..(&quot;sendsignal -i &lt;pid&gt;&quot;) before doing
+<br> the actual work and it works fine when called from a batch file.
+<br> thanx: nibujorim@yahoo.com
+
+
+<hr> 
+2004-12-09 : Same storage problem
+<br>  --  John
+<br>&nbsp;&nbsp;D:\download&gt;SendSignal.exe 1496
+<br>&nbsp;&nbsp;Sending signal to process 1496...
+<br>&nbsp;&nbsp;Access denied; retrying with increased privileges.
+<br>&nbsp;&nbsp;CreateRemoteThread failed with 0x00000008.
+<br>&nbsp;&nbsp;StartRemoteThread failed with 0x00000008.
+<br>&nbsp;&nbsp;0x00000008 == Not enough storage is available to process this command.
+<br>Also, I get the same error using the StackTrace from http://tmitevski.users.mcs2.netarray.com/stacktrace.jsp.
+
+<hr> 
+2005-05-13 : Fix for 0x00000008 error
+<br> The not enough storage error occurs when you're in a terminal services session  on the machine
+<br> you're running send signal on. To fix, you need to either run it physically on the machine,
+<br> or use a console terminal services session  (mstsc.exe /console).
+
+<hr>
+2005-07-08 : the fix for 0x00000008 error works great! Thanks.  
+<br> Been struggling with this the whole day myself running into the same error
+<br> over a terminal connection to a windows 2003 server machine
+
+<hr>
+2006-04-04 : exactly what I was looking for, Thanks
+<br> allways was very annoyed of lacking kill -QUIT feature on windows machines
+<br> Thanks for this tool
+
+<hr>
+2006-04-12 : Awesome tool, thanks for your hard work on this.
+<br> Jess
+
+<hr> 
+2006-05-23 : The following command can be used in a script to seek out all java
+processes on your host and send the kill -QUIT signal to them.  Apologies but
+it assumes you have some Unix exe's and &quot;pslist&quot; from SysInternals - maybe one
+of you can help me by using native Windows tools instead :)
+<br><br>--- sendAllSignals.bat ---
+<br>for /F &quot;usebackq&quot; %%p in ( `pslist.exe ^| grep java ^| awk &quot;{print $2}&quot;` ) do ( start /min SendSignal.exe %%p )
+<br><br>  -- Glen Lewis (glen underscore lewis underscore junk at hotmail dot com )
+
+<hr>
+2006-05-29 : Thanks for the contribution, Glen.
+<br> -- Louis
+
+<hr>
+2006-07-28 : Awesome tool!! I am having customers use it.  I just had one run into an issue where 
+they were getting an access violation. Any Thoughts?
+<br>&nbsp;&nbsp;
+Here is the stack:
+<br>&nbsp;&nbsp;
+<br>&nbsp;&nbsp;{6}=&gt; startserver server1
+<br>&nbsp;&nbsp;ADMU0116I: Tool information is being logged in file
+<br>&nbsp;&nbsp;C:\WebSphere\logs\server1\startServer.log
+<br>&nbsp;&nbsp;ADMU0128I: Starting tool with the parts64was profile
+<br>&nbsp;&nbsp;ADMU3100I: Reading configuration for server: server1
+<br>&nbsp;&nbsp;ADMU3200I: Server launched. Waiting for initialization status.
+<br>&nbsp;&nbsp;ADMU3000I: Server server1 open for e-business; process id is 4392
+<br>&nbsp;&nbsp;{7}=&gt;
+<br>&nbsp;&nbsp;{7}=&gt; c:/downloads/sendSignal 4392
+<br>&nbsp;&nbsp;Sending signal to process 4392...
+<br>&nbsp;&nbsp;(remote function) failed with 0xC0000005.
+<br>&nbsp;&nbsp;StartRemoteThread failed with 0xC0000005.
+<br>&nbsp;&nbsp;0xC0000005 == (FormatMessage failed)
+
+<br> --Tom
+
+<hr>
+2006-10-09 : That's very unusual to get an access violation. Two guesses. One is that there is a
+conflict in the load address of some DLLs, causing the address of the system control-handler 
+to move and be different in the target process than where it is in SendSignal. 
+Another possibility is that the control-handler installed by the server is crashing with an AV.
+Without looking at it under a debugger, I can't tell what's going on and I can't give you any
+recommendations (besides to use a debugger to find out what's going on).
+<br> -- Louis! :)
+<br>(Also, see comment below dated 2007-02-21.)
+
+<hr> 
+2006-10-05 : I have one issue with sendsignal.exe.  I use the batch script (above)
+to enumerate all the java processes on the windows box.  Unfortunately, any processes
+running with -Xrs gets killed (as in gone) when SendSignal signals them.  I hoped to
+use -Xrs for those processes whose thread dumps I'm not interested in.
+<br><br>  -- Glen Lewis (glen underscore lewis underscore junk at hotmail dot com )
+
+<hr>
+2006-10-09 : Unfortunately, that's not the way SendSignal works. SendSignal invokes the 
+ctrl-break handler for the target process. It can be any process, not just a JVM.
+What happens after that depends upon what kind of
+handler the process has installed. There's no way for SendSignal to find out what that handler
+is and decide whether to run it. The default handler kills the process. The JVM (except when run
+with -Xrs) installs a replacement that dumps all the stacks.
+<p> Hypothetically, I suppose it would be possible to find the data structure containing the list
+of handlers and decide whether the JVM had installed a handler or not. However, that would be very
+OS version and patch level dependent. You are welcome to give it a shot since the source code is
+available, but I think you'd find it easier to modify your batch script to keep a list of which
+processes should and should not be signalled.
+<br> -- Louis! :)
+
+<hr>
+2006-10-12 : Is the source still available?  I am getting a &quot;connect failed&quot; error from CVS.  I
+would like to change the source to send an arbitrary signal, not just ctrl-break. I specifically
+want something that does a ctrl-c, which is a SIGINT.
+<br> -- Peter Johnson
+
+<hr>
+2006-10-13 : Yes, the code is still available. I just tested my server and I can access it 
+remotely using the command I gave above. Perhaps port 2401 is blocked by your local firewall?
+<br> -- Louis! :)
+
+<hr>
+2006-10-22 : Hey Louis, I want to use your code to send a child ruby process Ctrl-C instead of break,
+for a graceful shutdown. It worked excellent! but with other programs I'm getting this:
+<br>&nbsp;&nbsp;Sending signal to process 368...
+<br>&nbsp;&nbsp;(remote function) failed with 0x00000009.
+<br>&nbsp;&nbsp;StartRemoteThread failed with 0x00000009.
+<br>&nbsp;&nbsp;0x00000009 == The storage control block address is invalid.
+<br>What should I do?
+<br> -- Luis
+
+<hr>
+2006-11-04 : Hey! Nice work dude. 
+<br> -- bazeusz
+
+<hr>
+2006-11-08: 
+<br> louisth 2005-05-13&gt;&gt;&gt; To fix, you need to either run it physically on the machine, or use a 
+<br> louisth 2005-05-13&gt;&gt;&gt; console terminal services session  (mstsc.exe /console).
+<br>On a W2k Server, it also works from a Telnet session (the /console option for mstsc does not 
+<br>work on W2k, AFAIK).  Only glitch is that the Telnet session gets killed when SendSignal is 
+<br>called, yet the target PID still gets the signal.  We also learned that you need the 
+<br>&quot;Debug Programs&quot; privilege for SendSignal to work.    
+<br> - Thanx 1M for at great tool.     -- /Carsten
+
+<hr>
+2006-11-13: I used your tool and i'm getting the following error
+<br>Sending signal to process 5880...
+<br>Access denied; retrying with increased privileges.
+<br>AdjustTokenPrivileges failed with 0x00000514.
+<br>SetPrivilege(SeDebugPrivilege) failed with 0x00000514.
+<br>AdvancedOpenProcess(5880) failed with 0x00000514.
+<br>0x00000514 == Not all privileges referenced are assigned to the caller.
+<br> -- pradeep
+
+<hr>
+2006-11-14 : Pradeep, you you don't have sufficient permissions to send the signal. The process
+must be your own, or you must have debug privilege (which the error indicates you do not have).
+<br> -- Louis! :)
+<br> 2006-11-26 : See <code>http://www.microsoft.com/msj/0398/win320398.aspx</code>.
+<br> -- Louis! :)
+
+<hr>
+2006-11-13
+ i changed my apllication to run under my account rather than as a system service ..
+ now it is able to send signal to it but i cant see the dumps
+ anywhere (console and the apllication logs)..
+<br>pradeep
+
+<hr>
+2006-11-13
+i used your tool to get the dump of an IDE it's able to send the signal 
+but i cant see the dump anywhere.. where to look for it
+<br> -- nagaraj
+
+<hr>
+2006-11-16 : Pradeep and Nagaraj : The JVM always sends the stack dump to stdout. Thus, where the 
+stack dump goes depends upon how the process was run. If you have redirected stdout to a file,
+you will see the output there. If the process has no console (because you are using javaw or 
+because you have started java detatched from a console), the output is lost. If the console exists
+but is simple not visible (likely case if running as a service), use my SaveConsole tool to grab
+the text from the invisible console.
+<br> -- Louis! :)
+<br> 2006-11-27 : Correction: stack dumps are sent to stderr.
+<br> -- Louis! :)
+
+<hr> 
+(2007-01-11) :  Hi Louis, my Java process is installed as service using JavaService.exe. During the 
+installation, I did not specify -Xrs as a flag to use. And the stdout and stderr are redirected to 
+the logs directories (I know that they work because I have seen the output from System.out and 
+System.err go into those files. However, I do not see any output from SendSignal (and the process
+does not die when I use it, so it is not a -Xrs issue). Here is my command line dump:
+<br>
+d:\downloads&gt;SendSignal.exe 7776<br>
+Sending signal to process 7776...<br>
+Access denied; retrying with increased privileges.<br>
+<br>
+d:\downloads&gt;<br>
+
+Any help would be appreciated.
+<br>  --  Sudha
+
+<hr>
+(2007-01-12) : Hmm. Sounds like it should have worked. It didn't report a failure. Are you sure you
+have the right process id? Are you running any JVMTI agents that are handling 
+jvmtiEventDataDumpRequest? 
+(http://java.sun.com/j2se/1.5.0/docs/guide/jvmti/jvmti.html#DataDumpRequest)
+Also, System.err and stderr don't have to be the same. It is possible
+to redirect System.err from within a Java program (System.setErr()). All writes to System.err will 
+go to the new location. However, that does not change where stderr (file descriptor 3) is pointed.
+<br> . . .
+<br> OK, never mind all that. JavaService eats ctrl-break. See 
+http://cvs.forge.objectweb.org/cgi-bin/viewcvs.cgi/javaservice/javaservice/src/JavaInterface.cpp?rev=1.6&amp;content-type=text/vnd.viewcvs-markup
+ (search for ConsoleControlHandler).
+<br> -- Louis! :)
+
+<hr>
+2007-02-21 : Fantastic tool! This is an update to the comment posted on 2006-07-28
+<br>
+<br>I had the exact same problem, but I determined that it wasn't a problem with SendSignal. After I
+installed the latest JVM (1.4.2 SR7), the problem went away, and I could get
+stack traces from WebSphere again.
+<br> -- Gary
+
+<hr>
+Getting the below error using sendsignal on Win 2003
+<br> CreateRemoteThread failed with 0x00000005.
+<br> StartRemoteThread failed with 0x00000005.
+<br> 0x00000005 == Access is denied.
+<br>--ra
+
+<hr>
+hi, 
+<br>sendsingal doesn't work for me. I have tried to run the sendsignal on my windows xp box,I got the following message. Please help. Thanks.
+<br>C:\&gt;SendSignal.exe 3528
+<br>Sending signal to process 3528...
+<br>am i missing something?
+
+<hr><br>
+Great tool, just one enhancement request please :-) 
+<br>We have a java app that is long running (5+hours). It will be great if sendsignal could put print a timestamp and then have the
+stack trace printed. We plan to run sendsignal in a &quot;schedule&quot; say every 10mnts etc. and to know what 
+the dump was at what &quot;time&quot; would really help.
+<br>Thanks again.
+<br>Kay
+
+<hr> 
+7/9/2007 : This tool is fantastic. I needed a way to send CTRL-C to another 
+process (it had nothing to do with Java) and your hack works perfectly. 
+(Of course I had to change CTRL_BREAK to CTRL_C in the source code.) 
+<br>  --  Thomas
+
+<hr>
+7/31/2007 : This tool is great, but one question what is the PARAM_0_BASE_THREAD_START_OFFSET required to make this work on AMD64 running as a 64bit process on a Windows Server 2003
+I realize the Address will be different between a 32bit process and a 64bit process, I just want to send the signal to 64bit processes. 
+I modified your code a bit to get the StackPointer using NtCurrentTeb() but so far all my attempts to walk up the stack to find the address of Kernel32!CtrlRoutine have failed
+Thanks in advance.
+<br> -- Keith
+
+<hr>
+2007-08-04 : Hi all. I want to assure you I do read and appreaciate all the comments. 
+However, I don't really have
+time to respond to them. All the problems you guys are having are in environments I don't have any
+way of reproducing. All I could do is make wild guesses.
+<br> You have the source code - go forth, meet the challenge, figure it out!
+<br> -- Louis! :)
+
+<hr>
+2007-09-11 : Nice tool, I use it to shutdown java processes by sending CTRL-C Signals. 
+To compile the source with MinGW I had to change the assembler statements on lines 260 and 261 to:<br>
+    __asm__ ( &quot;mov %%fs:(0x04), %%eax&quot; ::);<br>
+    __asm__ ( &quot;mov %%eax,  %[pStackBase]&quot; : [pStackBase] &quot;=r&quot; (pStackBase) );<br>
+works with g++ 3.4.2
+<br> -- Stefan
+
+<hr>
+2007-10-23 : Thanks so much, this works great.  I too am using it to send interrupts to Java processes.<br>
+Thank you Stefan for the instructions on getting the software to compile with MinGW
+<br> -- Kevin C
+
+<hr>
+2007-10-07 : Hi, i am tring to use smartCVS to download sendsignal source code but no luck. Is the information below correct.
+CVS path: 
+User Name: anon
+Server Name: ww.latenighthacking.com
+Repository path: /code-cvsroot co /2003/SendSignal
+
+I keep getting I/O error while connecting to host www.latenighthacking.com
+
+<hr>
+2008-7: very nice! Thanks!
+<br>
+
+<hr>
+8-7-2008 : Hi Louis, Relating to a question that you were asked a while back, how can one switch off the -Xrs flag in win2000??
+<br> -- DaithiG
+
+
+<hr>
+<br>
+2008-08:
+Save my efforts to implement 'kill -3' in windows. Thank you!
+How can I get the source code?
+
+<hr> 
+20080923 : You're a lifesaver.  I've been struggling with being unable to Ctrl-Break a
+backgrounded JVM on Windows for so long, and it finally irritated me enough to go
+searching.  I ran across GenerateConsoleCtrlEvent and was about to implement it when
+I thought &quot;If it's really that easy, then somebody has to have already done this&quot;...
+Google promptly sent me here.
+<br>
+<br>If you're ever in Austin and want a beer...<br>
+<br>  -- crf
+
+<hr> 
+20090320 : I have been trying to use sendsignal on Windows 2003 Ent Server with 
+Websphere 6.1.0.19 and keep on getting the following message, despite being logged 
+on as the system admin. Can anybody help?
+<br>
+Sending signal to process 7916...
+CreateRemoteThread failed with 0x00000005.
+StartRemoteThread failed with 0x00000005.
+0x00000005 == Access is denied.
+<br>
+<br> -- JME - SIEMENS Corporation
+<hr>
+20090514 : Does anyone has a 64-bit version of this useful tool ? <br>
+--
+dleborgne /AT/ coheris /DOT/ com
+
+20090601
+Amazing tool.. hats off..
+-Suresh
+
+<hr>
+(20090826) : Same issue with the following error when I tried the sendSignal. I used it in a terminal services session on the machine you're running send signal on.
+To fix this, you need to either run it physically on the machine, or use a console terminal services session (mstsc.exe /console) with admin rights - as suggested earlier but to no
+avail. Running on WIN 2000 SP 4
+CreateRemoteThread failed with 0x00000008.
+StartRemoteThread failed with 0x00000008.
+0x00000008 == Not enough storage is available to process this command. Any advice? Appreciate it. 
+<br> -- YL
+
+<hr>
+(20090911) : One fix for CreateRemoteThread failed with 0x00000008 issue (usually you get this issue if you run sendsignal to send ctrl+break to a process on windows 2003 through a terminal seervices session)
+is to use PSexec tool to launch a command prompt on remote machine.
+PsExec is a light-weight telnet-replacement that lets you execute processes on other systems, 
+complete with full interactivity for console applications, without having to manually install 
+client software. PsExec's most powerful uses include launching interactive command-prompts on remote systems.
+<br> -- Kishlai Prasad
+(20090911) 
+<hr>
+Guys, Easiest of all is just do remote login with /admin switch i.e mstsc /admin to the remote machine and execute sendsignal
+You will see the warning Access denied and retrying with increased priveleges but it will create heapdumps
+<br> --Jayashankar Divi
+(20090911) 
+<hr>
+Very practical to sqeeuze a thread dump out of a runaway application server !!!
+(20091020)
+<hr>
+(20091130) :
+Running sendsignal on Windows Server 2008 triggers the _Verify (assert) check:<br>
+Verify failed: 'NULL!=g_dwCtrlRoutineAddr' is false.<br>
+On Windows Server 2003 (64-bit), changing the stack offset (PARAM_0_OF_BASE_THREAD_START_OFFSET)
+from -3 to -14 was sufficient to make sendsignal work, but that does not work on 2008; other
+offsets with values that looked like return addresses were -15, -21, and -51 but none of those
+worked.  Has anyone figured how to get the correct control routine address?  Has the architecture
+changed so dramatically that the sendsignal concept may no work at all on Windows 2008?
+<br> -- John Elion
+<br>This works great as of 07/15/2010 on JRE 1.6 and XP platform. Thanks Louis....<br>
+
+Hi Louis,
+
+Please advise the usage of this tool in windowsxp. I used the below syntax. Where it is generating thread dump.
+
+C:\HeapDumps&gt;SendSignal.exe 5976
+Sending signal to process 5976...
+
+C:\HeapDumps&gt;
+<hr>
+(2010085) :
+I want to get the threaddump for an eclipse IDE process running on Windows 2003 Server.
+I triggered SendSignal 5828. It prints - Sending Signal to process 5828... and then nothing happens.  
+The process was spawned by IBM JRE v6.
+1) any special syntax for firing SendSignal in windows 2003 server ?
+2) does it work on 64 bit machine ?
+<br> -- Kaniska Mandal (eBay)
+
+<hr>
+(20101118)<br>
+Hi Louis,
+<br>I have a similar problem. I got an error during starting sendSignal.exe on windows 2003 Server.
+I got the message that it is not compatible with a 64-bit system. Can you provid a 64-bit-compatible 
+Version of SendSignal.exe?
+<br> Thank in advance,<br>
+Catharina
+<hr>
+
+Hi Louis,
+It's a great tool, however this is not working for javaws, where my app stderr and stdout are redirectied to a log file.
+Other standard output/errror is redirecting to log file.
+Any clues/ideas?
+--Mandadi
+
+Hi Mandadi,
+If you are using the SUN JVM, the utility only outputs the stack to the console (for javaw there is no console).
+The IBM JVM outputs the stack to a physical file, for example - maybe other JVMs do as well or maybe there's a command line switch for SUN JVM to enable this?
+Hope this helps,
+Ron
+<hr>
+(20110401)<br>
+I'v made some codes for getCtrlRoutine works well on Windows 2008,both 32-bit and 64-bit.<br>
+The method is using CaptureStackBackTrace get the address in CtrlRoutine and using SymInitialize to get the address of CtrlRoutine.<br>
+Codes are listed in the fowllowing.<br>
+LPVOID getCtrlRoutine()<br>
+{<br>
+&nbsp;&nbsp;&nbsp;&nbsp;LPVOID ctrlRoutine;<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;//CtrlRoutine --&gt; MyHandle --&gt; getCtrlRoutine<br>
+&nbsp;&nbsp;&nbsp;&nbsp;//set the CaptureStackBackTrace's first param to 2 to ingore the MyHandler and getCtrlRoutine calls.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;//shoud disable complier optimization on Release version.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;USHORT count = CaptureStackBackTrace(2,1,&amp;ctrlRoutine,NULL);<br>
+&nbsp;&nbsp;&nbsp;&nbsp;if(count!=1)<br>
+&nbsp;&nbsp;&nbsp;&nbsp;{<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;printf(&quot;CaptureStackBackTrace error\n&quot;);<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return NULL;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;}<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;HANDLE hProcess = GetCurrentProcess();<br>
+&nbsp;&nbsp;&nbsp;&nbsp;if(!SymInitialize(hPress,NULL,TRUE))<br>
+&nbsp;&nbsp;&nbsp;&nbsp;{<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;printf(&quot;SymInitialize error\n&quot;);<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return NULL;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;}<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;ULONG64 buffer[(sizeof(SYMBOL_INFO) + MAX_SYM_NAME*sizeof(TCHAR) + sizeof(ULONG64)-1)/sizeof(ULONG64)];<br>
+&nbsp;&nbsp;&nbsp;&nbsp;PSYMBOL_INFO pSymbol = (PSYMBOL_INFO)buffer;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;pSymbol-&gt;SizeOfStruct = sizeof(SYMBOL_INFO);<br>
+&nbsp;&nbsp;&nbsp;&nbsp;pSymbol-&gt;MaxNameLen = MAX_SYM_NAME;<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;LPVOID funcCtrlRoutine = NULL;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;DWORD64 dwDisplacement = 0;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;if(!SymFromAddr(hProcess,(DWORD64)ctrlRoutine,&amp;dwDisplacement,pSymbol))<br>
+&nbsp;&nbsp;&nbsp;&nbsp;{<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;printf(&quot;SymFromAddr error\n&quot;);<br>
+&nbsp;&nbsp;&nbsp;&nbsp;}<br>
+&nbsp;&nbsp;&nbsp;&nbsp;else<br>
+&nbsp;&nbsp;&nbsp;&nbsp;{<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;funcCtrlRoutine = reinterpret_cast&lt;LPVOID&gt;(pSymbol-&gt;Address);<br>
+&nbsp;&nbsp;&nbsp;&nbsp;}<br>
+&nbsp;&nbsp;&nbsp;&nbsp;SymCleanup(hProcess);<br>
+&nbsp;&nbsp;&nbsp;&nbsp;return funcCtrlRoutine;<br>
+}<br>
+<br>--Zhang YongBo<br>
+<br>
+(15-feb-2012)<br>
+I take it that the symbol hPress ought be hProcess?<br>
+See the following line from your code above:<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;if(!SymInitialize(hPress,NULL,TRUE))<br>
+<br>
+--Erik Leunissen<br>
+
+March 5, 2012 : Anyone get this to work?  Seems promising.  I got it to build but on XP, my testing has SymFromAddr returning the address of 'GetConsoleCharType' rather than the magic console handler routine.  (Ideally I'd like one executable to run on XP, 2003, 2008, Vista, Win7, etc.)<br>
+- John Elion
+<br>
+     
+<hr>
+March 27, 2012
+<br>
+Does anyone have a compiled version of the latest code?
+thanks! - Jimmy N.
+<br>
+
+<hr>
+(2012-07-11) : You find binaries e.g. here:
+<code>https://github.com/walware/statet/tree/master/de.walware.statet.r.console.core/win32</code>
+<br>  --  Stephan
+
+
+</Div>
+<Div class="discuss-prefoot" Id="spnDiscuss2" xStyle="display:none;">
+<!--
+<B>C o m m e n t s :</B> 
+&nbsp; &nbsp; 
+<Span class="FakeLink" 
+  OnClick="ShowHideDiscuss();"
+  OnMouseOver="window.status='Click to view visitor comments about this page.';"
+  OnMouseOut="window.status='';"
+>View</Span>
+&nbsp; &nbsp; 
+-->
+<Span class="FakeLink" 
+  OnClick="document.getElementById('frmDiscussEdit').submit();"
+  OnMouseOver="window.status='Click to add a comment to this page.';"
+  OnMouseOut="window.status='';"
+>Edit</Span>
+</Div>
+<Div class="discuss-foot"></Div>
+
+<Table Border="0" CellSpacing="0" CellPadding="0" Width="100%" Class="GlobalFooter">
+  <TR>
+    <TD Width="40%" Align="left"><B>
+      
+      <Script>
+        function getMailto() {
+          return "mailto:Louis K. Thomas <foo@bar.com>".replace(/foo/, "&#108;ouisth").replace(/bar/,"hotmai&#108;");
+        }
+      </Script>
+      <Span Class="FakeLink"
+        OnClick="window.location=getMailto();"
+        OnMouseOver="window.status='Click to send e-mail.';"
+        OnMouseOut="window.status='';"
+      >
+      Louis K. Thomas
+      &lt;&#108;oui<Span Style="display:none">N&Oslash;SP@M</Span>sth@hotm<Span
+      Style="display:none">&Ntilde;OSP@M</Span>&#97;il.co<Span Style="display:none">N&Otilde;SP@M</Span>m&gt;</Span>
+      <A Href="http://members.hostedScripts.com/antispam.html" Style="display:none">Fight Spam!</A>
+  
+    </B></TD>
+    <TD Width="20%" Align="Center" Style="font-size:8pt">
+      
+      <Span Class="FakeLink"
+        OnClick="window.location='/&#97;uth'+'/projects/2003/sendSignal/index.html';"
+        OnMouseOver="window.status='Click to authenticate.';"
+        OnMouseOut="window.status='';"
+      >Auth</Span>
+      
+    </TD>
+    <TD Width="40%" Align="right"><B>
+            2010-02-18 (977 days ago)
+    </B></TD>
+</TR>
+</Table>
+
+</Body>
+</HTML>
